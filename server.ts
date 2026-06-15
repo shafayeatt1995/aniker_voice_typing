@@ -17,6 +17,7 @@ const ROOT_YDOTOOL_SOCKET = "/tmp/.ydotool_socket";
 const YDOTOOL_SUDO_WRAPPER = join(import.meta.dir, "scripts", "ydotool-sudo.sh");
 
 type PasteBody = { text?: string };
+type BackspaceBody = { count?: number };
 type PasteSuccess = { ok: true; message: string };
 type PasteError = { ok: false; error: string };
 type InputMethod = "ydotool-type" | "clipboard-ydotool" | "xdotool-type";
@@ -219,6 +220,27 @@ async function typeText(text: string): Promise<void> {
   await runYdotool(["type", text]);
 }
 
+async function sendBackspace(count: number): Promise<void> {
+  const method = inputMethod ?? findInputMethod();
+  if (!method) {
+    throw new Error("No input method. Run: sudo ydotoold");
+  }
+
+  // ydotool only accepts raw keycodes — names like "BackSpace" are ignored.
+  for (let i = 0; i < count; i++) {
+    await delay(12);
+    switch (method) {
+      case "ydotool-type":
+      case "clipboard-ydotool":
+        await runYdotool(["key", "-d", "30", "14:1", "14:0"]);
+        break;
+      case "xdotool-type":
+        await runCommand("xdotool", ["key", "BackSpace"]);
+        break;
+    }
+  }
+}
+
 async function copyToClipboard(text: string): Promise<void> {
   if (Bun.which("wl-copy")) {
     return spawnWithStdin("wl-copy", [], text);
@@ -341,6 +363,33 @@ function printStartupInfo(): void {
   });
 }
 
+async function handleBackspace(req: Request): Promise<Response> {
+  let body: BackspaceBody;
+  try {
+    body = (await req.json()) as BackspaceBody;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid JSON" }, 400);
+  }
+
+  const count = body.count ?? 1;
+  if (!Number.isInteger(count) || count < 1 || count > 100) {
+    return jsonResponse(
+      { ok: false, error: "count must be an integer from 1 to 100" },
+      400
+    );
+  }
+
+  try {
+    await sendBackspace(count);
+    return jsonResponse({ ok: true, message: "Backspace sent" });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to send backspace";
+    console.error("Backspace failed:", message);
+    return jsonResponse({ ok: false, error: message }, 500);
+  }
+}
+
 async function handlePaste(req: Request): Promise<Response> {
   let body: PasteBody;
   try {
@@ -376,6 +425,7 @@ const server = Bun.serve({
   routes: {
     "/": index,
     "/paste": { POST: handlePaste },
+    "/backspace": { POST: handleBackspace },
   },
   development: { hmr: true, console: true },
 });

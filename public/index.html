@@ -61,6 +61,7 @@
         min-height: 220px;
         resize: vertical;
         line-height: 1.5;
+        caret-color: #ff8c00;
       }
 
       textarea:focus {
@@ -84,6 +85,17 @@
       #resetBtn:active {
         background: #1a1000;
       }
+
+      #status {
+        min-height: 1.25rem;
+        text-align: center;
+        font-size: 0.85rem;
+        color: #888;
+      }
+
+      #status.error {
+        color: #ff6b6b;
+      }
     </style>
   </head>
   <body>
@@ -92,28 +104,119 @@
       <textarea
         id="textInput"
         placeholder="Tap here, type or use voice typing — text goes to PC automatically"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
       ></textarea>
       <button type="button" id="resetBtn">Reset</button>
+      <div id="status" aria-live="polite"></div>
     </div>
 
     <script>
       const textInput = document.getElementById("textInput");
       const resetBtn = document.getElementById("resetBtn");
+      const statusEl = document.getElementById("status");
 
       const SEND_TIMEOUT_MS = 90000;
+      const ANCHOR = "\u200B";
 
       let composing = false;
       let lastSentIndex = 0;
       let processing = false;
+      let backspaceHandled = false;
+      /** @type {Array<{ kind: 'text', text: string } | { kind: 'backspace', count: number }>} */
       const queue = [];
+
+      const DELETE_INPUT_TYPES = new Set([
+        "deleteContentBackward",
+        "deleteWordBackward",
+        "deleteSoftLineBackward",
+        "deleteHardLineBackward",
+      ]);
+
+      function stripAnchor(value) {
+        return value.split(ANCHOR).join("");
+      }
+
+      function hasTypedText() {
+        return stripAnchor(textInput.value).length > 0;
+      }
+
+      function isDeleteInput(inputType) {
+        return DELETE_INPUT_TYPES.has(inputType);
+      }
+
+      function isBackspaceKey(event) {
+        return (
+          event.key === "Backspace" ||
+          event.code === "Backspace" ||
+          event.keyCode === 8 ||
+          event.which === 8
+        );
+      }
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message;
+        statusEl.classList.toggle("error", isError);
+      }
+
+      function markBackspaceHandled() {
+        backspaceHandled = true;
+        requestAnimationFrame(() => {
+          backspaceHandled = false;
+        });
+      }
+
+      function placeCaretAtEnd() {
+        const end = textInput.value.length;
+        textInput.setSelectionRange(end, end);
+      }
+
+      function prepareInput() {
+        textInput.value = ANCHOR;
+        lastSentIndex = 0;
+        placeCaretAtEnd();
+      }
+
+      async function performPcBackspace(count = 1) {
+        setStatus("Deleting on PC...");
+        const result = await postBackspaceToPc(count);
+        if (result.ok) {
+          setStatus("Deleted on PC");
+          window.setTimeout(() => setStatus(""), 1200);
+          return true;
+        }
+        setStatus(result.error || "Backspace failed", true);
+        return false;
+      }
+
+      function requestPcBackspace(count = 1) {
+        if (!count) return;
+        markBackspaceHandled();
+        queue.push({ kind: "backspace", count });
+        processQueue();
+      }
+
+      async function handlePcBackspace() {
+        prepareInput();
+        markBackspaceHandled();
+        await performPcBackspace(1);
+        focusTextarea();
+      }
 
       function focusTextarea() {
         textInput.focus();
+        if (!textInput.value.includes(ANCHOR)) {
+          prepareInput();
+        } else {
+          placeCaretAtEnd();
+        }
       }
 
       function resetInput() {
-        textInput.value = "";
-        lastSentIndex = 0;
+        prepareInput();
+        setStatus("");
         focusTextarea();
       }
 
@@ -135,7 +238,42 @@
             return { ok: true };
           }
 
-          return { ok: false, error: data.error || "Send failed" };
+          return {
+            ok: false,
+            error: data.error || `Send failed (${response.status})`,
+          };
+        } catch (err) {
+          if (err.name === "AbortError") {
+            return { ok: false, error: "Timed out" };
+          }
+          return { ok: false, error: "Connection failed" };
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      async function postBackspaceToPc(count) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+
+        try {
+          const response = await fetch("/backspace", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ count }),
+            signal: controller.signal,
+          });
+
+          const data = await response.json().catch(() => ({}));
+
+          if (response.ok && data.ok) {
+            return { ok: true };
+          }
+
+          return {
+            ok: false,
+            error: data.error || `Backspace failed (${response.status})`,
+          };
         } catch (err) {
           if (err.name === "AbortError") {
             return { ok: false, error: "Timed out" };
@@ -150,18 +288,27 @@
         if (processing) return;
         processing = true;
 
-        while (queue.length > 0) {
-          const text = queue.shift();
-          const result = await postToPc(text);
+        try {
+          while (queue.length > 0) {
+            const item = queue.shift();
+            const result =
+              item.kind === "text"
+                ? await postToPc(item.text)
+                : await postBackspaceToPc(item.count);
 
-          if (!result.ok) {
-            textInput.value = text + textInput.value;
-            lastSentIndex = 0;
-            break;
+            if (!result.ok) {
+              if (item.kind === "text") {
+                const current = stripAnchor(textInput.value);
+                textInput.value = item.text + current + ANCHOR;
+                lastSentIndex = 0;
+              }
+              setStatus(result.error || "Failed", true);
+              break;
+            }
           }
+        } finally {
+          processing = false;
         }
-
-        processing = false;
 
         if (queue.length > 0) {
           processQueue();
@@ -170,15 +317,19 @@
 
       function enqueueText(text) {
         if (!text) return;
-        queue.push(text);
+        queue.push({ kind: "text", text });
         processQueue();
       }
 
       function flushDelta() {
-        const current = textInput.value;
+        const current = stripAnchor(textInput.value);
 
         if (current.length < lastSentIndex) {
+          const deletedCount = lastSentIndex - current.length;
           lastSentIndex = current.length;
+          requestPcBackspace(deletedCount);
+          prepareInput();
+          return;
         }
 
         const newText = current.slice(lastSentIndex);
@@ -188,13 +339,50 @@
         enqueueText(newText);
 
         if (!composing) {
-          textInput.value = "";
-          lastSentIndex = 0;
+          prepareInput();
         }
       }
 
-      textInput.addEventListener("input", flushDelta);
+      textInput.addEventListener("beforeinput", (event) => {
+        if (composing || !isDeleteInput(event.inputType)) return;
+
+        if (hasTypedText()) return;
+
+        event.preventDefault();
+        void handlePcBackspace();
+      });
+
+      textInput.addEventListener("input", (event) => {
+        if (backspaceHandled) return;
+
+        const current = stripAnchor(textInput.value);
+
+        if (isDeleteInput(event.inputType)) {
+          if (current.length < lastSentIndex) {
+            const deletedCount = lastSentIndex - current.length;
+            lastSentIndex = current.length;
+            requestPcBackspace(deletedCount);
+          } else if (current.length === 0 && lastSentIndex === 0) {
+            requestPcBackspace(1);
+          }
+
+          prepareInput();
+          return;
+        }
+
+        flushDelta();
+      });
+
       textInput.addEventListener("compositionupdate", flushDelta);
+
+      textInput.addEventListener("keydown", (event) => {
+        if (composing || backspaceHandled || !isBackspaceKey(event)) return;
+
+        if (hasTypedText()) return;
+
+        event.preventDefault();
+        void handlePcBackspace();
+      });
 
       textInput.addEventListener("compositionstart", () => {
         composing = true;
@@ -203,14 +391,16 @@
       textInput.addEventListener("compositionend", () => {
         composing = false;
         flushDelta();
-        textInput.value = "";
-        lastSentIndex = 0;
+        prepareInput();
         focusTextarea();
       });
 
       resetBtn.addEventListener("click", resetInput);
 
-      window.addEventListener("load", focusTextarea);
+      window.addEventListener("load", () => {
+        prepareInput();
+        focusTextarea();
+      });
     </script>
   </body>
 </html>
