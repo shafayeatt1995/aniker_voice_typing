@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Mouse Dev
+Comment=Start phone-voice-paste dev server
+Exec=gnome-terminal -- zsh -lic 'cd "/run/media/shafayet/New Volume/Project/mouse" && bun run setup && bun run dev; exec zsh'
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;
