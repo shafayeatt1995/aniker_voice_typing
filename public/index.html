@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#000000" />
+    <title>Phone Voice Paste</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        background: #000;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family:
+          system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          sans-serif;
+        color: #f0f0f0;
+        padding: 1rem;
+        padding-bottom: max(1rem, env(safe-area-inset-bottom));
+      }
+
+      .container {
+        max-width: 640px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.75rem;
+        font-weight: 700;
+        text-align: center;
+        color: #ff8c00;
+      }
+
+      textarea {
+        width: 100%;
+        border: 2px solid #222;
+        border-radius: 12px;
+        background: #000;
+        color: #f5f5f5;
+        font-size: 1.05rem;
+        padding: 0.9rem 1rem;
+        outline: none;
+        transition: border-color 0.15s ease;
+        min-height: 220px;
+        resize: vertical;
+        line-height: 1.5;
+      }
+
+      textarea:focus {
+        border-color: #ff8c00;
+      }
+
+      #resetBtn {
+        border: 2px solid #ff8c00;
+        border-radius: 12px;
+        background: #000;
+        color: #ff8c00;
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 1rem 1.25rem;
+        min-height: 56px;
+        cursor: pointer;
+        touch-action: manipulation;
+        width: 100%;
+      }
+
+      #resetBtn:active {
+        background: #1a1000;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Aniker Voice typing</h1>
+      <textarea
+        id="textInput"
+        placeholder="Tap here, type or use voice typing — text goes to PC automatically"
+      ></textarea>
+      <button type="button" id="resetBtn">Reset</button>
+    </div>
+
+    <script>
+      const textInput = document.getElementById("textInput");
+      const resetBtn = document.getElementById("resetBtn");
+
+      const SEND_TIMEOUT_MS = 90000;
+
+      let composing = false;
+      let lastSentIndex = 0;
+      let processing = false;
+      const queue = [];
+
+      function focusTextarea() {
+        textInput.focus();
+      }
+
+      function resetInput() {
+        textInput.value = "";
+        lastSentIndex = 0;
+        focusTextarea();
+      }
+
+      async function postToPc(text) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+
+        try {
+          const response = await fetch("/paste", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+            signal: controller.signal,
+          });
+
+          const data = await response.json().catch(() => ({}));
+
+          if (response.ok && data.ok) {
+            return { ok: true };
+          }
+
+          return { ok: false, error: data.error || "Send failed" };
+        } catch (err) {
+          if (err.name === "AbortError") {
+            return { ok: false, error: "Timed out" };
+          }
+          return { ok: false, error: "Connection failed" };
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      async function processQueue() {
+        if (processing) return;
+        processing = true;
+
+        while (queue.length > 0) {
+          const text = queue.shift();
+          const result = await postToPc(text);
+
+          if (!result.ok) {
+            textInput.value = text + textInput.value;
+            lastSentIndex = 0;
+            break;
+          }
+        }
+
+        processing = false;
+
+        if (queue.length > 0) {
+          processQueue();
+        }
+      }
+
+      function enqueueText(text) {
+        if (!text) return;
+        queue.push(text);
+        processQueue();
+      }
+
+      function flushDelta() {
+        const current = textInput.value;
+
+        if (current.length < lastSentIndex) {
+          lastSentIndex = current.length;
+        }
+
+        const newText = current.slice(lastSentIndex);
+        if (!newText) return;
+
+        lastSentIndex = current.length;
+        enqueueText(newText);
+
+        if (!composing) {
+          textInput.value = "";
+          lastSentIndex = 0;
+        }
+      }
+
+      textInput.addEventListener("input", flushDelta);
+      textInput.addEventListener("compositionupdate", flushDelta);
+
+      textInput.addEventListener("compositionstart", () => {
+        composing = true;
+      });
+
+      textInput.addEventListener("compositionend", () => {
+        composing = false;
+        flushDelta();
+        textInput.value = "";
+        lastSentIndex = 0;
+        focusTextarea();
+      });
+
+      resetBtn.addEventListener("click", resetInput);
+
+      window.addEventListener("load", focusTextarea);
+    </script>
+  </body>
+</html>
